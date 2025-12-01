@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from absl.testing import parameterized
+from flax import nnx
 import jax
 from jax import sharding
 import jax.numpy as jnp
@@ -684,3 +685,105 @@ class UtilsTest(parameterized.TestCase):
       # Should not raise an error
       result = utils.transfer_state_with_mappings(src, dst, mappings)
       self.assertEqual(result.params[key].shape, (4, 128))
+
+  def test_transfer_state_directly_simple_transfer(self):
+    """Tests direct state transfer with matching structures."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    self.assertTrue(
+        jnp.array_equal(
+            dst_state['decoder']['layer0']['weight'][...],
+            jnp.array([1.0, 2.0]),
+        )
+    )
+
+  def test_transfer_state_directly_unwraps_base_and_model(self):
+    """Tests unwrapping of 'base' from src and 'model' from dst."""
+    # Source has 'base' wrapper
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))))
+        )
+    )
+    # Dest has 'model' wrapper
+    dst_state = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    self.assertTrue(
+        jnp.array_equal(
+            dst_state['model']['decoder']['layer0']['weight'][...],
+            jnp.array(1.0),
+        )
+    )
+
+  def test_transfer_state_directly_intersects_keys(self):
+    """Tests that only common keys are transferred; extras are ignored."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(2.0))),  # Extra in src
+        ),
+        rngs=nnx.Dict(),  # Extra in src
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+        kv_cache=nnx.Dict(),  # Extra in dst
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Common key should be updated
+    self.assertTrue(
+        jnp.array_equal(
+            dst_state['decoder']['layer0']['weight'][...], jnp.array(1.0)
+        )
+    )
+    # Extra key in dst should be preserved
+    self.assertIn('kv_cache', dst_state)
+    
+    # Extra key in src ('layer1') should NOT be added to dst.
+    self.assertFalse(hasattr(dst_state['decoder'], 'layer1'))
+
+  def test_transfer_state_directly_with_plain_dicts(self):
+    """Tests that the function works with plain Python dicts."""
+    src_state = {
+        'decoder': {
+            'layer0': {'weight': nnx.Param(jnp.array(1.0))},
+        },
+    }
+    dst_state = {
+        'decoder': {
+            'layer0': {'weight': nnx.Param(jnp.array(0.0))},
+            'layer1': {'weight': nnx.Param(jnp.array(0.0))},
+        },
+    }
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    self.assertTrue(
+        jnp.array_equal(
+            dst_state['decoder']['layer0']['weight'][...], jnp.array(1.0)
+        )
+    )
+    # Check that layer1 was not touched
+    self.assertTrue(
+        jnp.array_equal(
+            dst_state['decoder']['layer1']['weight'][...], jnp.array(0.0)
+        )
+    )
